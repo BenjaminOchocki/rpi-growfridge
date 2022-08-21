@@ -1,0 +1,152 @@
+version: '3.9'
+
+networks:
+  grownet:
+    ipam:
+      config:
+        - subnet: "172.42.0.0/24"
+
+services:
+  php-fpm:
+    build:
+      context: "./env/php-fpm/"
+      dockerfile: "Dockerfile"
+      args:
+        PHP_VERSION: ${PHP_VERSION?}
+    container_name: "php-fpm"
+    restart: "always"
+    networks:
+      grownet:
+        ipv4_address: 172.42.0.2
+    volumes:
+      - "${APP_DIR}:/var/www/html"
+      - "${PHP_CONFIG_LOCATION}:/usr/local/etc/php/conf.d/php.ini"
+
+  nginx:
+    image: nginx:${NGINX_VERSION}
+    container_name: "nginx"
+    restart: "always"
+    networks:
+      grownet:
+        ipv4_address: 172.42.0.3
+    depends_on:
+      - "php-fpm"
+    links:
+      - "php-fpm"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - "${APP_DIR}:/var/www/html"
+      - "${NGINX_CONFIG_LOCATION}:/etc/nginx/conf.d/default.conf"
+
+  mariadb:
+    image: mariadb:${MARIADB_VERSION}
+    container_name: "mariadb"
+    restart: "always"
+    networks:
+      grownet:
+        ipv4_address: 172.42.0.4
+    command: "--default-authentication-plugin=mysql_native_password"
+    volumes:
+      - "./env/mariadb/initdb:/docker-entrypoint-initdb.d"
+      - "${MARIADB_DATA_LOCATION}:/var/lib/mysql"
+      - "${MARIADB_CONFIG_FILE}:/etc/mysql/my.cnf"
+    environment:
+      MARIADB_ROOT_PASSWORD: "${MARIADB_ROOT_PASSWORD}"
+
+  phpmyadmin:
+    image: phpmyadmin:${PHPMYADMIN_VERSION}
+    container_name: "phpmyadmin"
+    restart: "always"
+    depends_on:
+      - "mariadb"
+    networks:
+      grownet:
+        ipv4_address: 172.42.0.5
+    ports:
+      - "8080:80"
+    environment:
+      PMA_HOST: "mariadb"
+      PMA_USER: "${PHPMYADMIN_DATABASE_USER}"
+      PMA_PASSWORD: "${PHPMYADMIN_DATABASE_PASSWORD}"
+
+  influxdb:
+    image: influxdb:${INFLUXDB_VERSION}
+    container_name: "influxdb"
+    restart: "always"
+    networks:
+      grownet:
+        ipv4_address: 172.42.0.6
+    ports:
+      - "8086:8086"
+    volumes:
+      - "${INFLUXDB_DATA_LOCATION}:/var/lib/influxdb2:rw"
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: "${INFLUXDB_MODE}"
+      DOCKER_INFLUXDB_INIT_USERNAME: "${INFLUXDB_USERNAME}"
+      DOCKER_INFLUXDB_INIT_PASSWORD: "${INFLUXDB_PASSWORD}"
+      DOCKER_INFLUXDB_INIT_ORG: "${INFLUXDB_ORGANISATION}"
+      DOCKER_INFLUXDB_INIT_BUCKET: "${INFLUXDB_BUCKET}"
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: "${INFLUXDB_TOKEN}"
+      DOCKER_INFLUXDB_INIT_RETENTION: "${INFLUXDB_RETENTION}"
+
+  sensor-reader:
+    container_name: sensor-reader
+    restart: "always"
+    networks:
+      grownet:
+        ipv4_address: 172.42.0.7
+    depends_on:
+      - "influxdb"
+    build:
+      context: "./env/python3/"
+      dockerfile: "Dockerfile"
+      args:
+        PYTHON_VERSION: "${PYTHON_VERSION?}"
+    volumes:
+      - "./env/python3/sensor/sensor_reader.py:/sensor_reader.py"
+    devices:
+      - "/dev/i2c-1:/dev/i2c-1"
+    command: "sh -c 'python3 /sensor_reader.py'"
+
+
+  relays-switcher:
+    container_name: "relays-switcher"
+    restart: "always"
+    networks:
+      grownet:
+        ipv4_address: 172.42.0.8
+    build:
+      context: "./env/python3/"
+      dockerfile: "Dockerfile"
+      args:
+        PYTHON_VERSION: "${PYTHON_VERSION?}"
+    links:
+      - "mariadb"
+    depends_on:
+      - "mariadb"
+      - "influxdb"
+    volumes:
+      - "./env/python3/relayboard/relays_switcher.py:/relays_switcher.py"
+    devices:
+      - "/dev/gpiomem:/dev/gpiomem"
+      - "/dev/i2c-1:/dev/i2c-1"
+    command: "sh -c 'python3 /relays_switcher.py'"
+
+  relays-off:
+    container_name: "relays-off"
+    networks:
+      grownet:
+        ipv4_address: 172.42.0.9
+    build:
+      context: "./env/python3/"
+      dockerfile: "Dockerfile"
+      args:
+        PYTHON_VERSION: "${PYTHON_VERSION?}"
+    volumes:
+      - "./env/python3/relayboard/relays_off.py:/relays_off.py"
+    devices:
+      - "/dev/gpiomem:/dev/gpiomem"
+      - "/dev/i2c-1:/dev/i2c-1"
+    command: "sh -c 'python3 /relays_off.py'"

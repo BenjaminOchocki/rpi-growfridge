@@ -1,0 +1,6 @@
+.env
+.idea
+data/*
+env
+install
+../src/public/pic.jpg
