@@ -1,0 +1,248 @@
+# Required imports
+import mysql.connector
+import bme280
+import smbus2
+import time
+import RPi.GPIO as GPIO
+from datetime import datetime
+from datetime import timedelta
+from influxdb_client import InfluxDBClient, Point, WritePrecision
+from influxdb_client.client.write_api import SYNCHRONOUS
+
+# Initialize the GPIO's with turned off status
+GPIO.setmode(GPIO.BCM)
+GPIO.setwarnings(False)
+RELAY_OFF = 1
+RELAY_ON = 0
+TURN_RELAY_ON = 1
+TURN_RELAY_OFF = 0
+UTC_OFFSET = 2
+
+# Represents all channels of the relay board with a name and its channel number
+dict_relay_channel = {
+    "RELAY_1_NAME": RELAY_1_CHANNEL,
+    "RELAY_2_NAME": RELAY_2_CHANNEL,
+    "RELAY_3_NAME": RELAY_3_CHANNEL,
+    "RELAY_4_NAME": RELAY_4_CHANNEL,
+    "RELAY_5_NAME": RELAY_5_CHANNEL,
+    "RELAY_6_NAME": RELAY_6_CHANNEL,
+    "RELAY_7_NAME": RELAY_7_CHANNEL,
+    "RELAY_8_NAME": RELAY_8_CHANNEL,
+}
+
+for relay in dict_relay_channel:
+    GPIO.setup(dict_relay_channel[relay], GPIO.OUT, initial=RELAY_OFF)
+
+## Initialize the sensor
+port = I2C_PORT
+address = I2C_ADDRESS
+bus = smbus2.SMBus(port)
+calibration_params = bme280.load_calibration_params(bus, address)
+
+## Initialize variables for influxdb
+# You can generate an API token from the API Tokens Tab in the UI
+token = "INFLUXDB_TOKEN"
+org = "INFLUXDB_ORGANISATION"
+bucket = "INFLUXDB_BUCKET"
+
+def get_database_connection():
+    """
+    Returns a mysql connection
+    """
+    return mysql.connector.connect(
+        user="GROWFRIDGE_DATABASE_USER",
+        password="GROWFRIDGE_DATABASE_PASSWORD",
+        host="mariadb",
+        database="LARAVEL_DATABASE_NAME",
+        raise_on_warnings=True)
+
+# Get a database connection
+database_connection = get_database_connection()
+
+# Get a database cursor
+db_cursor = database_connection.cursor(dictionary=True)
+
+# Time to wait before checking current conditions again
+seconds_to_wait_till_next_check = RELAY_WAIT
+
+def get_schedule_table():
+    """
+    Returns all entries from the growfridge.schedule table
+    """
+    query = "SELECT * FROM schedules"
+    db_cursor.execute(query)
+    result = db_cursor.fetchall()
+    database_connection.commit()
+    return result
+
+def get_active_schedule_entry():
+    """
+    Returns the active schedule entry or none
+    """
+    schedules = get_schedule_table()
+    if schedules:
+        now = datetime.now() + timedelta(hours=UTC_OFFSET)
+        for entry in schedules:
+            if (entry['condition_start'] < now) and (now < entry['condition_end']):
+                return entry
+
+        return None
+
+def get_active_condition():
+    """
+    Returns the active condition entry
+    """
+    schedules = get_schedule_table()
+
+    # For the case that there are no active entries in the schedule table
+    # this ensures that the dummy entry will be returned
+    get_active_condition_query = "SELECT * FROM conditions WHERE id=1"
+
+    if schedules:
+        # Check all entries and change the query if there is an active entry
+        now = datetime.now() + timedelta(hours=UTC_OFFSET)
+        for entry in schedules:
+            if (entry['condition_start'] < now) and (now < entry['condition_end']):
+                get_active_condition_query = "SELECT * FROM conditions WHERE id=" + str(entry['condition_id'])
+                break
+
+    # Fetch active condition
+    db_cursor.execute(get_active_condition_query)
+    result = db_cursor.fetchone()
+    database_connection.commit()
+
+    # Return active condition
+    return result
+
+def get_current_sensor_data():
+    """
+    Returns the sensor reading data
+    """
+    return bme280.sample(bus, address, calibration_params)
+
+
+def change_device_state(sensor_data, condition):
+    # Initialize variables for condition checking
+    current_temp = round(sensor_data.temperature, 2)
+    current_hum = round(sensor_data.humidity, 2)
+
+    """
+    ## Limit values before intervening
+    Depending on your hardware and the conditions in which the growfridge stands
+    these values must be changed accordingly. I recommend doing tests on how
+    fast your hardware changes the current conditions and tweaking the multipliers
+    until you reach the sweet spot of not going over max or under min values.
+    """
+    min_temp = condition['temperature'] - condition['temp_delta_bot']*0.75
+    max_temp = condition['temperature'] + condition['temp_delta_top']*0.75
+    min_hum = condition['humidity'] - condition['hum_delta_bot']*0.75
+    max_hum = condition['humidity'] + condition['hum_delta_top']*0.75
+    driver1_status = condition['light_white']
+    driver2_status = condition['light_red']
+
+    """
+    Create a periphery array and add GPIO status changes depending on the current sensor values.
+    Once all values have been checked and the array is completed, execute all changes. For every
+    check the state of each relay is logged.
+    """
+    periphery = []
+    if  current_temp < min_temp:
+        GPIO.output(dict_relay_channel['heating'], RELAY_ON)
+        GPIO.output(dict_relay_channel['cooling'], RELAY_OFF)
+        periphery.append(["periphery,host=growfridge heating=1" + " " + str(time.time_ns()),
+                        "periphery,host=growfridge cooling=0" + " " + str(time.time_ns())])
+    elif current_temp > max_temp:
+        GPIO.output(dict_relay_channel['cooling'], RELAY_ON)
+        GPIO.output(dict_relay_channel['heating'], RELAY_OFF)
+        periphery.append(["periphery,host=growfridge cooling=1" + " " + str(time.time_ns()),
+                          "periphery,host=growfridge heating=0" + " " + str(time.time_ns())])
+    elif min_temp < current_temp < max_temp:
+        GPIO.output(dict_relay_channel['heating'], RELAY_OFF)
+        GPIO.output(dict_relay_channel['cooling'], RELAY_OFF)
+        periphery.append(["periphery,host=growfridge cooling=0" + " " + str(time.time_ns()),
+                          "periphery,host=growfridge heating=0" + " " + str(time.time_ns())])
+
+    if  current_hum < min_hum:
+        GPIO.output(dict_relay_channel['humidifier'], RELAY_ON)
+        GPIO.output(dict_relay_channel['fan'], RELAY_OFF)
+        periphery.append(["periphery,host=growfridge humidifier=1" + " " + str(time.time_ns()),
+                          "periphery,host=growfridge fan=0" + " " + str(time.time_ns())])
+    elif current_hum > max_hum:
+        GPIO.output(dict_relay_channel['fan'], RELAY_ON)
+        GPIO.output(dict_relay_channel['humidifier'], RELAY_OFF)
+        periphery.append(["periphery,host=growfridge fan=1" + " " + str(time.time_ns()),
+                          "periphery,host=growfridge humidifier=0" + " " + str(time.time_ns())])
+    elif min_hum < current_hum < max_hum:
+        GPIO.output(dict_relay_channel['humidifier'], RELAY_OFF)
+        GPIO.output(dict_relay_channel['fan'], RELAY_OFF)
+        periphery.append(["periphery,host=growfridge humidifier=0" + " " + str(time.time_ns()),
+                          "periphery,host=growfridge fan=0" + " " + str(time.time_ns())])
+
+    if driver1_status == GPIO.input(dict_relay_channel['driver1']):
+        if driver1_status == TURN_RELAY_ON:
+            GPIO.output(dict_relay_channel['driver1'], RELAY_ON)
+            periphery.append(["periphery,host=growfridge driver1=1" + " " + str(time.time_ns())])
+        else:
+            GPIO.output(dict_relay_channel['driver1'], RELAY_OFF)
+            periphery.append(["periphery,host=growfridge driver1=0" + " " + str(time.time_ns())])
+    else:
+        periphery.append(["periphery,host=growfridge driver1=" + str(driver1_status) + " " + str(time.time_ns())])
+
+    if driver2_status == GPIO.input(dict_relay_channel['driver2']):
+        if driver2_status == TURN_RELAY_ON:
+            GPIO.output(dict_relay_channel['driver2'], RELAY_ON)
+            periphery.append(["periphery,host=growfridge driver2=1" + " " + str(time.time_ns())])
+        else:
+            GPIO.output(dict_relay_channel['driver2'], RELAY_OFF)
+            periphery.append(["periphery,host=growfridge driver2=0" + " " + str(time.time_ns())])
+    else:
+        periphery.append(["periphery,host=growfridge driver2=" + str(driver2_status) + " " + str(time.time_ns())])
+
+    # Write data to influxdb
+    with InfluxDBClient(url="http://influxdb:8086", token=token, org=org) as client:
+        write_api = client.write_api(write_options=SYNCHRONOUS)
+        write_api.write(bucket, org, periphery)
+        client.close()
+
+condition_before = []
+schedule_before = []
+
+while True:
+    # Get active condition
+    active_condition = get_active_condition()
+
+    if not condition_before and not schedule_before:
+        # Init variables on first run
+        condition_before = active_condition
+        condition_query = "SELECT * FROM schedules WHERE condition_id=" + str(condition_before['id'])
+        db_cursor.execute(condition_query)
+        schedule = db_cursor.fetchall()
+        database_connection.commit()
+        schedule_before = schedule[0]
+
+    if active_condition['id'] != condition_before['id']:
+        # The conditions have been changed
+
+        # Don't change the schedule start and end times if it is the dummy schedule
+        if schedule_before['id'] != 1:
+            # Add one day to start and end times
+            time_delta_one_day = timedelta(days=1)
+            schedule_before['condition_start'] += time_delta_one_day
+            schedule_before['condition_end'] += time_delta_one_day
+            write_query = "UPDATE `schedules` " + \
+                   "SET " + \
+                   "`condition_start` = \'" + str(schedule_before['condition_start']) + "\', " + \
+                   "`condition_end` = \'" + str(schedule_before['condition_end']) + "\' " + \
+                   "WHERE " + \
+                   "`schedules`.`id` = " + str(schedule_before['id'])
+            # Write changed to the database
+            db_cursor.execute(write_query)
+            database_connection.commit()
+
+            # Update condition and schedule before entries
+            condition_before = active_condition
+            schedule_before = get_active_schedule_entry()
+
+    # Change relay states depending on the active condition
+    change_device_state(get_current_sensor_data(), get_active_condition())
+    time.sleep(5)

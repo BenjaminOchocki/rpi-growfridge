@@ -1,0 +1,1 @@
+This directory holds all scripts needed to install the growfridge

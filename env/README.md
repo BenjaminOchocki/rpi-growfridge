@@ -1,0 +1,1 @@
+In this directory are all files needed for the growfridge usage

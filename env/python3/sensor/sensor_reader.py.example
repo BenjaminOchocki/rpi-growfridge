@@ -1,0 +1,51 @@
+# Required imports
+import bme280
+import smbus2
+import time
+from datetime import datetime
+from influxdb_client import InfluxDBClient, Point, WritePrecision
+from influxdb_client.client.write_api import SYNCHRONOUS
+
+## Initialize the sensor
+port = I2C_PORT
+address = I2C_ADDRESS
+bus = smbus2.SMBus(port)
+calibration_params = bme280.load_calibration_params(bus, address)
+
+## Initialize variables for influxdb
+# You can generate an API token from the API Tokens Tab in the UI
+token = "INFLUXDB_TOKEN"
+org = "INFLUXDB_ORGANISATION"
+bucket = "INFLUXDB_BUCKET"
+
+values_per_minute = SENSOR_VALUES_PER_MINUTE
+value_amount_to_write_to_db = SENSOR_VALUES_SAVED_BEFORE_WRITE_TO_DB
+
+value_counter = 0
+data_sequence = []
+
+# Wait for influxdb
+time.sleep(10)
+
+while True:
+    if datetime.now().second % (60/values_per_minute) == 0:
+        # If it is time to take a sensor reading, append the data to an array
+        sensor_data = bme280.sample(bus, address, calibration_params)
+
+        data_sequence.append(["sensor,host=growfridge temperature="+str(round(sensor_data.temperature, 2))+" "+str(time.time_ns()),
+                              "sensor,host=growfridge humidity="+str(round(sensor_data.humidity, 2))+" "+str(time.time_ns())])
+        value_counter += 1
+
+        if value_counter != value_amount_to_write_to_db:
+            # Wait until next reading
+            time.sleep((60/values_per_minute)*0.9)
+
+    if value_counter == value_amount_to_write_to_db:
+        # If the amount of values in the array reached the limit, write all data to database and clear the array
+        with InfluxDBClient(url="http://influxdb:8086", token=token, org=org) as client:
+            write_api = client.write_api(write_options=SYNCHRONOUS)
+            write_api.write(bucket, org, data_sequence)
+            client.close()
+
+        data_sequence = []
+        value_counter = 0

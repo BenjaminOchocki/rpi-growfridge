@@ -1,0 +1,39 @@
+/* Creates the conditions and schedule table. Also inserts dummy entries. */
+
+USE LARAVEL_DATABASE_NAME;
+
+CREATE TABLE LARAVEL_DATABASE_NAME.conditions (
+id INT(5) NOT NULL AUTO_INCREMENT,
+name VARCHAR(128) NOT NULL,
+info VARCHAR(1024) NOT NULL,
+light_white INT(1) NOT NULL,
+light_red INT(1) NOT NULL,
+temperature FLOAT(5,2) NOT NULL,
+temp_delta_top FLOAT(5,2) NOT NULL,
+temp_delta_bot FLOAT(5,2) NOT NULL,
+humidity FLOAT(5,2) NOT NULL,
+hum_delta_top FLOAT(5,2) NOT NULL,
+hum_delta_bot FLOAT(5,2) NOT NULL,
+created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ,
+updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+PRIMARY KEY (id)
+) ENGINE = InnoDB;
+
+INSERT INTO conditions (id, name, info, light_white, light_red, temperature, temp_delta_top, temp_delta_bot, humidity, hum_delta_top, hum_delta_bot)
+VALUES ('1', 'default',
+'This setting is an example and fallback entry.\r\n\r\nTemperature set to 20 with range of 0 to 100\r\nHumidity is set to 50 with range of 0 to 100',
+'0','0','20','80', '20', '50', '50', '50');
+
+CREATE TABLE LARAVEL_DATABASE_NAME.schedules (
+id INT(5) NOT NULL AUTO_INCREMENT,
+condition_id INT(5) NOT NULL,
+CONSTRAINT condition_id FOREIGN KEY (condition_id) REFERENCES conditions(id) ON DELETE RESTRICT ON UPDATE RESTRICT,
+condition_start DATETIME NOT NULL,
+condition_end DATETIME NOT NULL,
+created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ,
+updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+PRIMARY KEY (id)
+) ENGINE = InnoDB;
+
+INSERT INTO schedules (id, condition_id, condition_start, condition_end)
+VALUES ('1', '1', '1989-09-01 00:00:00', CURRENT_TIMESTAMP)
